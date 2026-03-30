@@ -1,0 +1,18 @@
+[submodule "references/pi-mono"]
+	path = references/pi-mono
+	url = https://github.com/badlogic/pi-mono
+[submodule "references/openclaw"]
+	path = references/openclaw
+	url = https://github.com/openclaw/openclaw
+[submodule "references/nanoclaw"]
+	path = references/nanoclaw
+	url = https://github.com/qwibitai/nanoclaw
+[submodule "references/nanobot"]
+	path = references/nanobot
+	url = https://github.com/HKUDS/nanobot
+[submodule "references/nemoclaw"]
+	path = references/nemoclaw
+	url = https://github.com/NVIDIA/NemoClaw
+[submodule "references/oh-my-pi"]
+	path = references/oh-my-pi
+	url = https://github.com/can1357/oh-my-pi
