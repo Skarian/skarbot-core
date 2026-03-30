@@ -1,0 +1,193 @@
+# Users and Threads
+
+Status: Research
+
+## Users
+
+- Each human user should have one long-lived direct thread in v1
+- New human users should go through an onboarding flow after authenticating through `exe.dev`
+- The onboarding flow should capture name, email, phone number, country code, and timezone
+- The onboarding flow should accept user-friendly phone input and normalize it before storage
+- The onboarding flow should infer timezone where possible and allow the user to confirm or correct it
+- Web membership lookup should use the authenticated email provided by the `exe.dev` proxy
+- External identities such as phone numbers and email senders should map to the approved Skarbot user record
+- Admin authority should come from protected config rather than from a user-record role field
+- The initial admin user should be created during setup rather than through the public onboarding flow
+- Terminal should stay out of scope in v1
+
+## User Store
+
+- Skarbot should keep one file-backed user record per member under `~/skarbot/state/users/`
+- User lifecycle should be filesystem-first:
+  - `~/skarbot/state/users/active/`
+  - `~/skarbot/state/users/pending/`
+  - `~/skarbot/state/users/denied/`
+- Each user record should use the same shape in `active`, `pending`, and `denied`
+- Pending, active, and denied user files should keep the same stable `<id>.json` filename when moved between directories
+- Each user record should include:
+  - `id`
+  - `name`
+  - `email`
+  - `phone`
+  - `timezone`
+- `id` should be a stable internal Skarbot identifier derived once at creation time and not recomputed later
+- If a derived user `id` collides, Skarbot should append `-2`, `-3`, and so on at creation time
+- User records should be stored as `<id>.json`, and that filename should stay stable after creation
+- `email` should be trimmed, lowercased, unique, and used as the web identity lookup key in v1
+- `phone` should be stored in canonical E.164 form, normalized from friendly input plus the submitted country code, used as the SMS identity lookup key in v1, and unique across user records
+- `timezone` should use an IANA timezone name and should default scheduled automation to that timezone in v1
+- On onboarding, Skarbot should first normalize and check `email` and `phone` across `active`, `pending`, and `denied` before deriving a new internal `id`
+- If normalized `email` already exists, onboarding should not create a duplicate record
+- If normalized `phone` already exists on a different record, onboarding should fail with a validation error and should not create a record
+- Membership approval should move a user record between these directories rather than requiring a database
+- Approved users should not self-edit `name`, `email`, or `phone` in v1; changes should happen through admin action or direct file edit
+- User records should not include timestamp fields in v1
+- User records do not need a `notes` field in v1
+- Admin authority should not be stored in user records
+- Admin authority should live in `~/skarbot/state/config/admin.json` as one protected `admin_user_id`
+
+## User Capabilities
+
+- Skarbot should have system skills and system tools in addition to per-user capabilities
+- System skills should live in the repo under `~/skarbot/core/capabilities/skills/`
+- System tools should live in the repo under `~/skarbot/core/capabilities/tools/`
+- Each approved user should have a dedicated promoted-capabilities directory that is separate from general workspace scratch
+- Promoted user capabilities should live under `~/skarbot/state/capabilities/users/<user-id>/`
+- User capabilities should be split into exactly two types in v1:
+  - `skills/`
+  - `tools/`
+- Skill capabilities should be markdown-first capability packages stored under `skills/<name>/`
+- Skill capabilities should require `SKILL.md` and may include helper scripts, references, and assets beside it
+- Tool capabilities should be SDK-native local package directories stored under `tools/<name>/`
+- Tool capabilities should require `package.json` and at least one extension entry declared under the `pi.extensions` key
+- Tool capabilities may include `src/`, helper files, scripts, and bundled binaries beside that package metadata
+- Tool capabilities should follow the same entrypoint-driven approach as `pi` extensions and `pi` packages rather than requiring a fixed internal layout such as `src/index.ts`
+- One `tools/<name>/` package may register multiple named tools in v1
+- The `tools/<name>/` directory should be treated as a capability bundle identifier rather than as a 1:1 tool-name binding
+- Tool capabilities should not require `SKILL.md` in v1; if human-facing docs are useful, they should use `README.md`
+- Tool capabilities should register first-class named tools through the `pi` extension API rather than through a custom executable manifest
+- Tool capabilities may call colocated scripts, bundled binaries, system executables on `PATH`, local package dependencies, and approved HTTP proxies from their extension code
+- Promoted user capabilities should be long-lived assets rather than ordinary scratch files
+- Each new run or turn owned by a user should resolve that user's active promoted capabilities automatically
+- Owned runs and turns should layer system capabilities first and then the owner's capabilities
+- That per-turn capability resolution should scan exactly:
+  - `~/skarbot/core/capabilities/skills/`
+  - `~/skarbot/core/capabilities/tools/`
+  - `~/skarbot/state/capabilities/users/<user-id>/skills/`
+  - `~/skarbot/state/capabilities/users/<user-id>/tools/`
+- Scheduled task runs owned by a user should inherit that user's active promoted capabilities automatically
+- Access to promoted user capabilities should not require scheduled tasks to run in the user's direct-thread workspace
+- Candidate capabilities should live under `~/skarbot/state/capabilities/candidates/users/<user-id>/`
+- Candidate capabilities should be staging artifacts only and should never be loaded into ordinary direct-thread sessions or unrelated task threads
+- In v1, each user should have at most one live candidate per capability name
+- If a capability update task starts and a same-named candidate exists, the task workspace should be seeded from that candidate
+- Otherwise, if an active same-named capability exists, the task workspace should be seeded from the active capability
+- Otherwise, the task workspace should start with a new empty capability
+- A capability-building task thread may temporarily load its own candidate capability for preview and feedback before approval
+- Candidate preview should overlay system plus active owner capabilities only inside that linked task thread
+- Candidate capabilities should pass deterministic validation as part of promotion before they are eligible for approval
+- That deterministic promotion path should surface tool-name collisions and other structural errors while the capability is still only a candidate
+- Approving a candidate should replace the active capability and delete the candidate
+- Discarding a candidate should delete the candidate
+- Removing an active capability should also delete any same-named candidate
+- Approval routing and reply grammar should follow `docs/runtime/approvals.md`
+- Standard runtime tool surfaces should be defined centrally in `docs/runtime/tools.md`
+- The grouped `capabilities` tool should use an OpenClaw-like action shape rather than many top-level tools
+- In v1, `capabilities` should support:
+  - `list`
+  - `inspect`
+  - `get`
+  - `promote`
+- `capabilities(action = "get")` should check out a working copy from candidate first, then active
+- `capabilities(action = "promote")` should run deterministic validation internally
+- If `promote` fails validation, it should return diagnostics directly to the task and should not notify the owner
+- If `promote` succeeds, it should replace the same-named candidate bundle and send a user approval request to the owner's main direct thread with a link to the task thread
+- `plan(...)` should be thread-local state rather than a user capability or a task-file field
+- Each thread should have at most one active plan in v1
+- `subagents(...)` should manage generic worker subagents scoped to the current thread
+- Spawned subagents should use model-chosen cute Malayalee names as their only active handles
+- Duplicate active subagent names in the same thread should be rejected
+- `schedule(...)` should be a user-owned direct-thread tool rather than a task-thread tool
+- `schedule()` should list the user's existing scheduled automations by stable schedule handle
+- Schedule mutations should require explicit user approval before persistence
+
+## Multi-User Direction
+
+- The user's wife should have her own direct thread in v1
+- The user's wife should be able to create task threads in v1
+- Approved non-admin users should reach the app through normal `exe.dev` login plus Skarbot membership approval
+- An authenticated email already present in `active` should go straight into the app rather than reaching onboarding again
+- An authenticated email already present in `pending` or `denied` should not create a duplicate user record
+
+## Thread Model
+
+- There should be one shared thread concept in v1
+- A thread linked to a task is a task thread
+- A thread without a linked task is a direct human conversation thread
+- Those thread types should map directly to the two execution profiles defined in `docs/runtime/execution-profiles.md`
+- Web UI, SMS, and admin email should all feed the same direct thread for that user in v1
+- A direct thread should be created lazily on the first real message rather than at approval time
+- Each task should map to exactly one task-linked thread in v1
+- Scoped work that would clutter a direct thread should move into its own task thread
+- Recurring schedules should bind to one dedicated task thread for repeated execution
+- One-off schedules should create one-off throwaway task threads
+- Routine outputs from scheduled tasks should be kept in the task thread history
+- Thread history should be stored under `~/skarbot/state/threads/`
+- Each thread should own one execution workspace in v1
+- Thread workspace and user capability scope should be separate concepts in v1
+- Workspaces should live under `~/skarbot/workspaces/`
+- Direct-thread workspaces should use `~/skarbot/workspaces/users/<user-id>/`
+- Task-thread workspaces should use `~/skarbot/workspaces/tasks/<task-slug>/`
+- Each workspace should keep its durable thread-local notes in a local `MEMORY.md`
+- Direct-thread workspaces should be created lazily on first actual direct-thread action
+- Task-thread session files should be created lazily on first actual run
+- Task-thread workspaces should be created lazily on first run
+- Direct-thread workspaces should persist by default and may be cleaned up explicitly on request
+- Task workspace retention should be controlled by task lifecycle on disk plus an empty `.deleteworkspace` marker file rather than inferred by the model
+- Each thread should use one append-only `.jsonl` session file in v1
+- Thread history should remain append-only even after compaction
+- Compaction should append a persistent summary boundary into the thread history rather than rewriting or deleting older entries
+- Future turns should see the latest compaction summary plus the recent tail after the compaction point, while older full history remains on disk for audit and search
+- Direct thread files should use `<user-id>.jsonl`
+- Task thread files should use `task-<task-slug>.jsonl`
+- The session header `id` should match the thread file stem for determinism
+- Direct-thread routing state should live beside the thread file in `<user-id>.meta.json`
+- The direct-thread sidecar file should contain only `latest_reply_channel` in v1
+- The direct-thread sidecar file should use JSON with the shape `{ "latest_reply_channel": "web" }`
+- The direct-thread sidecar file should be created lazily alongside the direct thread on the first inbound user message
+- Task threads should not use a `.meta.json` sidecar in v1
+- Direct-thread attachments should live beside the thread file in `<user-id>.attachments/`
+- Task-thread attachments should live beside the thread file in `task-<task-slug>.attachments/`
+- Direct-thread attachment directories should be created lazily on first attachment
+- Task-thread attachment directories should be created lazily on first attachment
+- Saved attachment filenames should preserve the original filename visibly while ensuring uniqueness with a millisecond timestamp prefix, for example `1732531234567_invoice.pdf`
+- Saved attachment filenames should sanitize unsafe characters before writing to disk
+- Thread files should follow the `pi-coding-agent` session-file format rather than a custom flat transcript shape
+- The first line should be a `SessionHeader` with `type = "session"`, `version`, `id`, `timestamp`, `cwd`, and optional `parentSession`
+- `SessionHeader.cwd` should be the workspace path for that thread rather than channel or event metadata
+- Capability loading and per-thread model behavior are defined centrally in `docs/runtime/execution-profiles.md` and `docs/providers.md`
+- If a user capability name collides with a system capability name, the user capability should win in v1
+- The remaining lines should be `SessionEntry` objects
+- Message-bearing entries should use `type = "message"` and `message = <AgentMessage>`
+- Compaction boundaries should use the substrate-compatible compaction entry shape rather than a Skarbot-specific transcript rewrite format
+- Session-entry timestamps should stay ISO 8601 strings
+- Nested `AgentMessage` timestamps should use Unix milliseconds
+- Direct-thread ownership should be derived from the `<user-id>.jsonl` filename
+- Task-thread linkage should be derived from the `task-<task-slug>.jsonl` filename and the task file
+- Core LLM-compatible message roles should be `user`, `assistant`, and `toolResult`
+- User messages may use plain text or structured `TextContent` and `ImageContent`
+- Assistant messages should use structured `pi-ai` content blocks and preserve text, thinking, tool calls, provider, model, usage, stopReason, and timestamp
+- Assistant tool use should be preserved through `ToolCall` content blocks inside assistant `content`
+- Tool results should use `role = "toolResult"` plus `toolCallId`, `toolName`, structured `content`, `isError`, and `timestamp`
+- Core `pi` messages should stay free of ad-hoc routing fields in v1
+- Direct-thread routing should still preserve the canonical v1 channel names `web`, `sms`, and `admin-email`
+- If the direct-thread sidecar is missing or unreadable, Skarbot should default direct replies to `web`
+- Web, `sms`, and `admin-email` attachments should be saved locally and converted at ingress into standard substrate-compatible `user.content` blocks following the `pi-web-ui` attachment pattern
+- V1 should not split thread history into separate `context` and `log` files
+- Thread compaction should use rolling summaries:
+  - the latest compaction summary remains in history
+  - the next compaction should incorporate that summary plus older post-compaction messages
+  - tool-call and tool-result content included in compaction prompts should be truncated during serialization
+- Compaction events should be visible in the thread history and in the web UI thread viewer only
+- Replies should default to the same surface that initiated the interaction instead of mirroring across every surface
+- Logs and status remain non-thread surfaces
