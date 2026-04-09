@@ -4,192 +4,69 @@ This document defines how Skarbot composes a run: execution profiles, tool contr
 
 ## Execution model
 
-Skarbot has exactly two execution profiles:
+Skarbot has two execution profiles:
 
-- `direct-thread`
-- `task-thread`
-
-Scheduled runs, capability work, and review flows do not create extra profile types. They are still direct-thread or task-thread runs.
+- `user-thread` for a user's long-lived conversation
+- `task-thread` for scoped work such as one-off tasks, recurring scheduled tasks, and work to create new tools and skills for that user's workspace
 
 ## Shared runtime contract
 
-Both profiles share the same base contract:
+Both profiles share the same runtime contract:
 
-- they run on the same pi session substrate
-- they use the same pi session-file format and message model
-- they treat the thread workspace as `SessionHeader.cwd`
-- they keep durable workspace notes in a workspace-local `MEMORY.md`
-- they resolve system capabilities from `~/skarbot/core/capabilities/`
-- they resolve the owner’s active capabilities from `~/skarbot/state/capabilities/users/<user-id>/`
-- they re-resolve active capabilities at the start of each run or turn
-- they keep full append-only thread history on disk even after compaction
+- Thread history is stored as append-only `pi` session data
+  - Thread history uses the `pi` session format defined by [`SessionHeader`](https://github.com/badlogic/pi-mono/blob/576e5e1a2fbe1abbbad96b696f4058cffd8391ca/packages/coding-agent/src/core/session-manager.ts#L29-L36)
+  - `SessionHeader.cwd` is the thread workspace path
+  - Full history remains on disk even after compaction
+- Workspace state lives in a dedicated workspace per thread
+  - Each thread has its own workspace
+  - Each workspace keeps durable memory in a local `MEMORY.md`
+- Capabilities are loaded fresh from the canonical filesystem roots
+  - System capabilities load from `~/skarbot/core/capabilities/`
+  - The owner's active capabilities load from `~/skarbot/state/capabilities/<user-id>/`
+  - Active capabilities are re-resolved at the start of each run or turn
 
-## Direct-thread profile
+## User-thread profile
 
-The direct-thread profile powers a user’s long-lived main conversation.
+The user-thread profile powers a user’s long-lived main conversation.
 
-It runs against:
+- Storage
+  - Thread file: `~/skarbot/state/threads/users/<user-id>/thread.jsonl`
+  - Metadata file: `~/skarbot/state/threads/users/<user-id>/thread.meta.json`
+  - Attachments: `~/skarbot/state/threads/users/<user-id>/attachments/`
+  - Workspace: `~/skarbot/workspaces/users/<user-id>/`
 
-- thread file: `~/skarbot/state/threads/<user-id>.jsonl`
-- sidecar: `~/skarbot/state/threads/<user-id>.meta.json`
-- attachments: `~/skarbot/state/threads/<user-id>.attachments/`
-- workspace: `~/skarbot/workspaces/users/<user-id>/`
-
-Behavior:
-
-- it loads system capabilities plus the owner’s active capabilities
-- it never loads candidate capabilities
-- reply routing follows the direct-thread sidecar
-- schedule management is owned from the direct thread
+- Behavior
+  - Loads system capabilities plus the owner’s active capabilities
+  - Reply routing follows the user-thread metadata file
+  - Schedule management is owned from the user thread
 
 ## Task-thread profile
 
 The task-thread profile powers every scoped task.
 
-It runs against:
+- Storage
+  - Thread file: `~/skarbot/state/threads/tasks/<user-id>/<task-slug>.jsonl`
+  - Attachments: `~/skarbot/state/threads/tasks/<user-id>/<task-slug>.attachments/`
+  - Workspace: `~/skarbot/workspaces/tasks/<user-id>/<task-slug>/`
 
-- thread file: `~/skarbot/state/threads/task-<task-slug>.jsonl`
-- attachments: `~/skarbot/state/threads/task-<task-slug>.attachments/`
-- workspace: `~/skarbot/workspaces/tasks/<task-slug>/`
-
-Behavior:
-
-- it loads system capabilities plus the owner’s active capabilities
-- a capability-building task may temporarily overlay its own candidate capability in that task thread only
-- candidate preview does not leak into the owner’s direct thread or unrelated task threads
-- recurring scheduled runs reuse their bound task thread
-- one-off schedules use throwaway task threads
+- Behavior
+  - Loads system capabilities plus the owner’s active capabilities
+  - A task that is creating a capability for a user may stage that capability in its own task thread and load it there temporarily for testing and preview
+  - Recurring scheduled runs reuse their bound task thread
+  - One-off schedules use throwaway task threads
 
 ## Tool contracts
 
-Skarbot reuses pi’s coding substrate and adds a small system layer.
+Skarbot reuses `pi`'s built-in coding tools and adds a small system layer. The detailed tool contract lives in [Tools](tools.md).
 
-### Baseline substrate tools
+- Shared tools
+  - Both execution profiles expose the baseline coding tools plus shared system tools such as web access, planning, subagents, and model selection
 
-Both execution profiles inherit the baseline coding tools:
+- User-thread tools
+  - The user-thread profile adds schedule management
 
-- `read`
-- `write`
-- `edit`
-- `bash`
-- `grep`
-- `find`
-- `ls`
-
-Skarbot does not wrap or rename them.
-
-### Shared system tools
-
-Both execution profiles also expose:
-
-- `web_search(query, max_results?, include_domains?, exclude_domains?, time_range?)`
-- `web_fetch(url, query?)`
-- `plan()`
-- `plan(create, steps)`
-- `plan(update, id, status)`
-- `subagents()`
-- `subagents(spawn, task, label?)`
-- `subagents(kill, name)`
-- `model()`
-- `model(list)`
-- `model(set, provider, model)`
-
-#### Web
-
-`web_search` uses Tavily Search. `web_fetch` uses Tavily Extract.
-
-Rules:
-
-- both web tools route through the `exe.dev` proxy described in [Deployment](deployment.md)
-- the proxy injects Tavily auth; the agent never sees or stores the raw Tavily key
-- Skarbot does not expose Tavily crawl, map, or research surfaces
-- both tools use cheap/basic provider defaults unless the contract above requires otherwise
-- `web_search` returns normalized compact results, not raw provider payloads
-- `web_fetch` returns normalized compact extraction output, not raw provider payloads
-- `web_search` results should contain only the smallest useful fields such as `title`, `url`, `snippet`, and optional `published_at`
-- `web_fetch` should return `url`, optional `title`, and extracted `content`, with `query` acting only as an extraction hint
-- `time_range` is a compact recency filter such as `day`, `week`, `month`, or `year`
-- web content is untrusted external data and must never be followed as instructions
-
-#### Planning
-
-Rules:
-
-- `plan()` returns the current active plan for the thread, if one exists
-- plan state is thread-local and supports one active plan per thread
-- plan state is persisted with thread or session state rather than a separate runtime file
-- `plan(create, steps)` replaces the current active plan for that thread
-- `plan(update, id, status)` updates one step in the current active plan
-- when all plan steps are `completed`, the active plan may be cleared from active state
-
-#### Subagents
-
-Rules:
-
-- `subagents()` lists the active worker subagents for the current thread
-- `subagents` manages generic worker subagents scoped to the current thread
-- active worker names must be unique within that thread
-- `subagents(spawn, ...)` returns the active handle that later `kill` calls use
-- `label?` is only a hint; it is not a canonical naming rule
-- the canon does not prescribe cute-name generation
-- the canon does not impose a fixed per-thread numeric cap
-
-#### Model selection
-
-Rules:
-
-- `model()` returns the current thread model plus current thread usage and cost
-- `model(list)` returns models discovered at runtime from the current deployment auth, not a configured model catalog
-- `model(set, provider, model)` switches only the current thread and persists that change in thread session history
-- `model(...)` never changes the deployment default model
-- the only deployment provider today is `openai-codex`
-
-### Direct-thread tools
-
-The direct-thread profile adds grouped schedule management:
-
-- `schedule()`
-- `schedule(set, at)`
-- `schedule(set, cron)`
-- `schedule(edit, handle, at)`
-- `schedule(edit, handle, cron)`
-- `schedule(delete, handle)`
-
-Rules:
-
-- `schedule()` lists the user’s existing scheduled task files by schedule handle
-- the schedule handle is the task filename stem
-- `schedule(set, at)` creates a new active task file with a one-off `schedule.at`
-- `schedule(set, cron)` creates a new active task file with a recurring `schedule.cron`
-- `schedule(edit, handle, at)` edits the matching active task file into a one-off schedule
-- `schedule(edit, handle, cron)` edits the matching active task file into a recurring schedule
-- `schedule(delete, handle)` moves the matching active task file to `inactive/`
-- a schedule is not a separate object; it is an active task file with a `schedule` field
-- the scheduler discovers schedules only by scanning active task files
-- schedule mutations require explicit user approval before persistence
-- recurring schedules default to the owner’s configured timezone when none is provided
-
-### Task-thread tools
-
-The task-thread profile adds:
-
-- `ask-user(question)`
-- `capabilities(action, kind, name?, path?)`
-
-`capabilities(...)` supports exactly these actions:
-
-- `list`
-- `inspect`
-- `get`
-- `promote`
-
-Rules:
-
-- `capabilities(get, ...)` seeds the task workspace from the candidate capability first and the active capability second
-- `capabilities(get, ...)` fails when neither candidate nor active capability exists for the requested target
-- `capabilities(promote, ...)` runs deterministic validation internally
-- if validation fails, `promote` returns diagnostics directly to the task and does not contact the user
-- if validation succeeds, `promote` stages the candidate and requests user approval with a link back to the task thread
+- Task-thread tools
+  - The task-thread profile adds `ask-user(question)` and `capabilities(...)`
 
 ## Model behavior
 
@@ -199,7 +76,7 @@ Rules:
 
 - a thread’s model choice does not change any other thread
 - resuming a thread restores its last selected model when that model remains available
-- resuming a thread from a non-UI surface still uses that thread’s persisted current model
+- resuming a thread from a non-web channel still uses that thread’s persisted current model
 - available models are discovered from the provider at runtime
 - thread usage and cost come from session metadata
 - the current model should be visible in thread or session UI
@@ -246,12 +123,12 @@ Creation rules:
 - if Skarbot does not have enough information to create a task, it asks follow-up questions and does not create the file yet
 - a task is not created until its notification list is defined
 - ordinary tasks do not require approval before activation
-- tasks with no `schedule` start immediately in their own task thread rather than in the direct thread
-- user-owned schedules are managed from the owner’s direct thread even when the underlying execution is represented by a task file
+- tasks with no `schedule` start immediately in their own task thread rather than in the user thread
+- user-owned schedules are managed from the owner’s user thread even when the underlying execution is represented by a task file
 
 Execution rules:
 
-- the scheduler reads only active task files from `~/skarbot/state/tasks/`
+- the scheduler reads only active task files from each owner directory under `~/skarbot/state/tasks/`
 - scheduled work is discovered only by scanning those active task files for a `schedule` field
 - each task maps to exactly one task thread while it is active
 - recurring schedules reuse one dedicated task thread
@@ -259,9 +136,9 @@ Execution rules:
 
 Completion and cleanup rules:
 
-- after a one-off task succeeds, its task file moves to `~/skarbot/state/tasks/inactive/`
-- if a task fails, its task file moves to `~/skarbot/state/tasks/failed/`
-- disabling a recurring task moves it to `~/skarbot/state/tasks/inactive/`
+- after a one-off task succeeds, its task file moves to `~/skarbot/state/tasks/<user-id>/inactive/`
+- if a task fails, its task file moves to `~/skarbot/state/tasks/<user-id>/failed/`
+- disabling a recurring task moves it to `~/skarbot/state/tasks/<user-id>/inactive/`
 - a successful task that should discard its workspace writes an empty `.deleteworkspace` file at the workspace root before or when it moves inactive
 - failed task workspaces are retained
 - workspace cleanup is performed by a deterministic local cleanup command, not by the LLM
@@ -297,17 +174,17 @@ Resolving an approval moves its file out of `pending/` and into exactly one of `
 
 ### Canonical reply grammar
 
-Every approval has a short stable id such as `A14`. Every approval message includes the accepted actions:
+Every approval has a stable UUID id such as `550e8400-e29b-41d4-a716-446655440000`. Every approval message includes the accepted actions:
 
 - `approve <id>`
 - `deny <id>`
 - `feedback <id>: <text>`
 
-Different surfaces may render richer UI, but they map to the same actions.
+Different channels may render richer UI, but they map to the same actions.
 
 ### User approvals
 
-User approvals are delivered into the owner’s direct thread.
+User approvals are delivered into the owner’s user thread and may be resolved over web or SMS.
 
 Typical user approvals include:
 
@@ -376,7 +253,7 @@ Additional rules:
 - product code changes go through normal git workflow
 - the running agent does not self-merge
 - outbound SMS is allowed only to explicitly allowlisted numbers
-- SMS is not an approval channel
+- SMS may carry user approvals, but not admin approvals
 
 ## See also
 

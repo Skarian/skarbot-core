@@ -23,7 +23,6 @@ That choice is deliberate:
 ~/skarbot/workspaces
 ~/.skarbot/auth.json
 ~/.skarbot/admin.json
-~/.skarbot/instance.toml
 ```
 
 Detailed capability roots:
@@ -44,7 +43,6 @@ Ownership:
 - `~/skarbot/workspaces` — thread workspaces and scratch
 - `~/.skarbot/auth.json` — deployment-wide Codex auth
 - `~/.skarbot/admin.json` — deployment admin identity
-- `~/.skarbot/instance.toml` — generated deployment-local instance config
 
 Model auth is host-managed deployment state, not portable Skarbot state.
 
@@ -62,15 +60,14 @@ The setup flow is responsible for:
 3. creating and validating `~/skarbot/state/capabilities/users/` and `~/skarbot/state/capabilities/candidates/users/`
 4. validating the repo-backed system capability roots under `~/skarbot/core/capabilities/`
 5. installing repo-local dependencies, including the pi agent runtime substrate
-6. writing `~/.skarbot/instance.toml`
-7. wiring the expected `exe.dev` proxy, authenticated identity, and inbound admin email environment
-8. validating required integration endpoints such as ClickSend and the proxy-backed Tavily path
-9. creating the long-running launch mechanism and scheduled local maintenance wiring
-10. running health checks and printing relevant local or private status endpoints
-11. collecting the initial admin name, email, and phone number
-12. creating the initial admin user record directly under `~/skarbot/state/users/active/`
-13. writing `~/.skarbot/admin.json` with the one allowed admin user id
-14. guiding the admin through establishing deployment-wide Codex subscription auth on the VM
+6. wiring the expected `exe.dev` proxy, authenticated identity, and inbound admin email environment
+7. validating required integration endpoints such as ClickSend and the proxy-backed Tavily path
+8. creating the long-running launch mechanism and scheduled local maintenance wiring
+9. running health checks and printing relevant local or private status endpoints
+10. collecting the initial admin name, email, and phone number
+11. creating the initial admin user record directly under `~/skarbot/state/users/active/`
+12. writing `~/.skarbot/admin.json` with the one allowed admin user id
+13. guiding the admin through establishing deployment-wide Codex subscription auth on the VM
 
 Setup keeps deployment model auth outside portable `~/skarbot/state`.
 
@@ -124,20 +121,18 @@ Skarbot standardizes on Tavily for generic web access:
 
 Non-model integrations should prefer `exe.dev` integrations or proxy-backed secrets over raw secrets stored on disk.
 
-## Instance files
+## Host-managed files
 
-Deployment-local instance files live under:
+Host-managed deployment files live under:
 
 ```text
 ~/.skarbot/
   auth.json
   admin.json
-  instance.toml
 ```
 
 Rules:
 
-- `instance.toml` is the one generated deployment-local config file
 - `admin.json` is the one standalone admin-identity file
 - checked-in defaults stay in the repo
 - environment variables are for temporary overrides and automation

@@ -16,3 +16,6 @@
 [submodule "references/oh-my-pi"]
 	path = references/oh-my-pi
 	url = https://github.com/can1357/oh-my-pi
+[submodule "references/hermes-agent"]
+	path = references/hermes-agent
+	url = https://github.com/nousresearch/hermes-agent
