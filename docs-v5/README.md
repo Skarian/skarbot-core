@@ -29,11 +29,11 @@ This repo resides in `~/skarbot/core`. It defines the assistant product, manages
 
 ## Canonical vocabulary
 
-- **User thread** — long-lived conversations for each approved user
-- **Task thread** — a thread scoped for a task, workflow, or capability-building effort
+- **User-thread** — long-lived conversations for each approved user
+- **Task-thread** — a thread scoped for a task, workflow, or a task building a new custom skill or tool
 - **Workspace** — the filesystem working directory attached to each thread
 - **Capability** — a reusable skill or tool package made available to the agent per user
-- **Candidate capability** — a staged capability under review, not part of the user’s normal runtime
+- **Draft capability** — a staged tool or skill under review, not part of the user’s normal runtime
 - **Schedule** — an active task file with a `schedule` field
 - **Schedule handle** — the task filename stem
 - **Approval** — a file-backed decision request whose lifecycle and approver class are encoded by its directory path

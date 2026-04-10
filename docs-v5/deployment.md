@@ -30,8 +30,10 @@ Detailed capability roots:
 ```text
 ~/skarbot/core/capabilities/skills/
 ~/skarbot/core/capabilities/tools/
-~/skarbot/state/capabilities/users/
-~/skarbot/state/capabilities/candidates/users/
+~/skarbot/state/capabilities/<user-id>/skills/active/
+~/skarbot/state/capabilities/<user-id>/skills/drafts/
+~/skarbot/state/capabilities/<user-id>/tools/active/
+~/skarbot/state/capabilities/<user-id>/tools/drafts/
 ~/skarbot/workspaces/users/
 ~/skarbot/workspaces/tasks/
 ```
@@ -57,7 +59,7 @@ The setup flow is responsible for:
 
 1. validating `~/skarbot/state` and `~/skarbot/workspaces`
 2. creating and validating `~/skarbot/workspaces/users/` and `~/skarbot/workspaces/tasks/`
-3. creating and validating `~/skarbot/state/capabilities/users/` and `~/skarbot/state/capabilities/candidates/users/`
+3. creating and validating the user capability roots under `~/skarbot/state/capabilities/`
 4. validating the repo-backed system capability roots under `~/skarbot/core/capabilities/`
 5. installing repo-local dependencies, including the pi agent runtime substrate
 6. wiring the expected `exe.dev` proxy, authenticated identity, and inbound admin email environment
@@ -147,8 +149,8 @@ Operational expectations:
 - the scheduler reads only active task files
 - scheduled work is discovered from those task files, not from a separate registry
 - the task-workspace cleanup path is a deterministic local command
-- workspace deletion requires both an inactive task file and an empty `.deleteworkspace` marker in the workspace root
-- failed task workspaces are retained
+- workspace deletion requires both a task file in `inactive/` or `failed/` and an empty `.deleteworkspace` marker in the workspace root
+- when a task moves to `inactive/` or `failed/`, the runtime prunes known heavy generated directories from the workspace according to the runtime cleanup rules
 - the cleanup command runs once on startup and then from local cron every 30 minutes
 - the cleanup command is zero-token and exits immediately when no deletion markers exist
 - the web app may sit behind an `exe.dev` proxy that is publicly reachable while protected routes still require `exe.dev` login and Skarbot membership checks

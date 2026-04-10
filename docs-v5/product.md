@@ -6,7 +6,7 @@ This document defines Skarbot from the user’s point of view: what it is, who i
 
 Skarbot is a personal claw-like 24/7 AI assistant for a household. One deployment serves a household. The deployment has one admin who owns the VM
 
-Each approved person gets their own long-lived user thread with Skarbot. Family members share the deployment, but they do not share one conversation
+Each approved person gets their own long-lived `user-thread` with Skarbot. Family members share the deployment, but they do not share one conversation
 
 ## Interacting with Skarbot
 
@@ -23,12 +23,12 @@ Whether someone uses the web app, SMS, admin email, or schedules tasks, Skarbot 
 
 ## Web app
 
-The web app is the primary interface. It allows interacting with each member's long-lived user thread and individual task threads
+The web app is the primary interface. It allows interacting with each member's long-lived `user-thread` and individual `task-thread`s
 
 The web app includes:
 
 - a home page and docs that explains what Skarbot is and how to use it
-- a user thread and task thread chat interface with ability to add attachments
+- a `user-thread` and `task-thread` chat interface with ability to add attachments
 - a simple onboarding flow for authenticated people who are not yet approved users
 - a waiting screen for users whose approval is still pending or denied
 - basic logs and health status visibility
@@ -37,7 +37,7 @@ The web app includes:
 
 The chat interface makes two distinctions explicit:
 
-- user threads versus task threads
+- `user-thread`s versus `task-thread`s
 - ordinary message history versus compaction boundaries and tool calls
 
 Chat and task-thread timestamps are rendered in the viewer’s local time
@@ -72,7 +72,7 @@ The initial admin user is created during deployment setup, not through the publi
 
 ## Channel behavior
 
-Web, SMS, and admin email all land in the user thread unless the interaction is explicitly routed into a task thread
+Web and SMS land in the `user-thread` unless the interaction is explicitly routed into a `task-thread`. Admin approval email resumes the waiting work it refers to.
 
 Channel rules:
 
@@ -83,16 +83,16 @@ Channel rules:
 - outbound member email is not a general product channel
 - outbound email is reserved for admin notifications and approvals
 
-User approvals may occur over web and SMS. Admin approvals occur over email
+User approvals may occur over web and SMS. Admin approvals occur over email.
 
 ## Threads in the product
 
 A user sees two kinds of threads:
 
 - **User thread** — the long-lived personal conversation
-- **Task thread** — scoped work that should not clutter the user thread
+- **Task thread** — scoped work that should not clutter the `user-thread`
 
-Scheduled work runs in task threads. Capability-building work runs in task threads
+Scheduled work runs in `task-thread`s. Building custom tools and skills happens in `task-thread`s.
 
 ## What Skarbot is optimized for
 

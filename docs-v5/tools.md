@@ -16,6 +16,8 @@ Both execution profiles expose the baseline coding tools from `pi`'s [`codingToo
 
 Skarbot does not wrap or rename them.
 
+The runtime may still apply path-level protections. Runtime-owned read-only paths such as `./tasks/` in the `user-thread` workspace are readable through the baseline tools but not writable.
+
 ## Shared system tools
 
 Both execution profiles also expose:
@@ -70,7 +72,7 @@ Rules:
 - `subagents()` lists the active worker subagents for the current thread
 - `subagents` manages generic worker subagents scoped to the current thread
 - active worker names must be unique within that thread
-- `subagents(spawn, ...)` returns the active handle that later `kill` calls use
+- `subagents(spawn, ...)` returns the active name that later `kill` calls use
 - `label?` is only a hint; it is not a canonical naming rule
 - the canon does not prescribe cute-name generation
 - the canon does not impose a fixed per-thread numeric cap
@@ -87,80 +89,93 @@ Rules:
 - the only deployment provider today is `openai-codex`
 - task threads may also start from a model override already stored in the task file
 
-### Thread inspection and attachments
+### Attachments
 
-The runtime will likely need a small structured thread-inspection surface plus attachment import.
-
-The exact contract still needs to be refined, but the current direction is:
-
-- `thread_events(since?, limit?, type?, query?)`
-- `attachments_import(id, path?)`
-
-Current notes:
-
-- attachment references should live in thread history rather than being discovered by scanning storage
-- the runtime may store canonical attachment blobs separately from thread workspaces
-- `attachments_import(...)` should stage an attachment into the active workspace rather than exposing raw cross-thread filesystem paths
+Attachments are read directly from the runtime-owned paths in `./chat/attachments/` for the current thread and `./tasks/<task-slug>/attachments/` for owned tasks.
 
 ## User-thread tools
 
-The user-thread profile adds grouped schedule management:
+The user-thread profile exposes grouped task management:
 
-- `schedule()`
-- `schedule(set, at)`
-- `schedule(set, cron)`
-- `schedule(edit, handle, at)`
-- `schedule(edit, handle, cron)`
-- `schedule(delete, handle)`
+- `tasks(list)` lists the user's active tasks
+- `tasks(list, state)` lists the user's tasks in the requested state
+  - allowed task states are `active`, `paused`, `inactive`, and `failed`
+- `tasks(create, task)` creates a new task from a structured JSON payload
+  - payload shape:
 
-Rules:
+    ```json
+    {
+      "title": string,
+      "instructions": string,
+      "notification": string[],
+      "schedule?": {
+        "at"?: string,
+        "cron"?: string,
+        "timezone"?: string
+      },
+      "capability?": {
+        "kind": "tool" | "skill",
+        "name": string
+      },
+      "model?": string,
+      "reasoning_effort?": string
+    }
+    ```
 
-- `schedule()` lists the user’s existing scheduled task files by schedule handle
-- the schedule handle is the task filename stem
-- `schedule(set, at)` creates a new active task file with a one-off `schedule.at`
-- `schedule(set, cron)` creates a new active task file with a recurring `schedule.cron`
-- `schedule(edit, handle, at)` edits the matching active task file into a one-off schedule
-- `schedule(edit, handle, cron)` edits the matching active task file into a recurring schedule
-- `schedule(delete, handle)` moves the matching active task file into that owner's `inactive/` directory
-- a schedule is not a separate object; it is an active task file with a `schedule` field
-- the scheduler discovers schedules only by scanning active task files
-- schedule mutations require explicit user approval before persistence
-- recurring schedules default to the owner’s configured timezone when none is provided
+  - fields marked with `?` are optional
+  - `owner` is implied by the current `user-thread` and must not be supplied by the model
+  - `schedule` must contain exactly one of `at` or `cron`
+  - `schedule.cron` uses standard 5-field cron syntax
+  - `schedule.at` uses ISO 8601 date-time text
+  - `schedule.timezone` uses an IANA timezone name such as `America/Chicago`
+  - if `schedule.timezone` is omitted, the task uses the owner's user-record timezone
+  - if `schedule.at` includes its own timezone, that value wins over `schedule.timezone`
+  - if `schedule` is omitted, the task starts immediately in its own `task-thread`
+  - if `capability` is present, `tasks(create, task)` creates a custom tool or skill task
+- `tasks(get, handle)` returns the current task record, current task state, waiting state if any, and the runtime-owned relative paths for that task's history and attachments
+  - it searches across all task states
+  - returned paths use this shape:
 
-The user-thread also exposes grouped review and approval for custom tools and skills:
+    ```json
+    {
+      "history_path": "./tasks/<task-slug>/history.jsonl",
+      "attachments_path": "./tasks/<task-slug>/attachments/"
+    }
+    ```
+  - `history_path` and `attachments_path` may be `null` before the task has run or before any task attachment exists
+- `tasks(pause, handle)` moves the matching active task file into `paused/`
+- `tasks(resume, handle)` moves the matching paused task file back into the active task directory
+- `tasks(cancel, handle)` moves the matching active or paused task file into `inactive/`
+- `tasks(schedule, handle, schedule_def)` updates the task schedule
+  - `schedule_def` uses the same schedule shape as `tasks(create, task).schedule`
+  - `tasks(schedule, ...)` may switch between one-off and recurring schedules
+  - `tasks(schedule, ...)` may remove scheduling by setting `schedule_def` to `null`, which makes the task immediate
+- `tasks(update, handle, instructions)` updates the task file instructions
+- `tasks(reply, handle, text)` delivers structured user input to the `task-thread`
+  - if the task is waiting, the message resumes the task
+  - if the task is active, the message is queued and becomes visible at the next runtime checkpoint between tool and model steps
+  - if the task is `paused`, `inactive`, or `failed`, the tool returns an error
+  - `tasks(reply, ...)` does not abort an active turn
 
-- `capabilities()`
-- `capabilities(review, kind, name)`
-- `capabilities(approve, kind, name)`
-- `capabilities(deny, kind, name)`
-- `capabilities(feedback, kind, name, text)`
+Current `user-thread` history is always available at `./chat/history.jsonl`. Owned task history is always available at `./tasks/<task-slug>/history.jsonl`.
 
-Rules:
+`./chat/` is canonical for the current thread. `./tasks/` is a runtime-owned read-only view for owned tasks.
+
+Current-thread attachments are always available at `./chat/attachments/`. Owned task attachments are always available at `./tasks/<task-slug>/attachments/`.
+
+Attachment-bearing history entries store attachment filenames, not attachment paths. In the current thread they resolve under `./chat/attachments/`. In `./tasks/<task-slug>/history.jsonl` they resolve under `./tasks/<task-slug>/attachments/`.
+
+`tasks(...)` is the main task creation and control surface in the `user-thread`.
+
+The user-thread profile also exposes grouped review and approval for custom tools and skills:
 
 - `capabilities()` lists the user's custom tools and skills, including draft and active versions
-- `capabilities(review, ...)` shows the current draft that is waiting for user review
-- `capabilities(approve, ...)` moves the matching draft to `active/`
-- `capabilities(deny, ...)` keeps the draft but does not activate it
-- `capabilities(feedback, ...)` keeps the draft and sends revision feedback back to the task thread
-- activation only happens from the `user-thread`
+- `capabilities(review, kind, name)` shows the current draft that is waiting for user review
+- `capabilities(approve, kind, name)` moves the matching draft to `active/`
+- `capabilities(deny, kind, name)` keeps the draft but does not activate it
+- `capabilities(feedback, kind, name, text)` keeps the draft and sends revision feedback back to the `task-thread`
 
-## User-thread task control
-
-The user-thread profile should also expose a grouped task-control tool for inspecting and controlling task-thread work from the user's `user-thread`.
-
-This is a deterministic control plane. It should not rely on freeform agent-to-agent conversation.
-
-The exact contract still needs to be finalized, but it should cover operations such as:
-
-- listing the user's tasks
-- reading task status
-- pausing a task
-- resuming a task
-- canceling a task
-- updating task instructions
-- replying to a task that is waiting for user input or approval
-
-The runtime should apply these operations as structured task events or task-state changes bound to the target task thread.
+Activation only happens from the `user-thread`.
 
 ## Task-thread tools
 

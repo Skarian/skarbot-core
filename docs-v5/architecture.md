@@ -45,11 +45,9 @@ This document defines the persistent Skarbot data model: users, threads, tasks, 
   logs/
   tasks/
     <user-id>/
+      paused/
       inactive/
       failed/
-  threads/
-    users/
-    tasks/
   users/
     active/
     pending/
@@ -109,43 +107,54 @@ Skarbot builds on the `pi` agent SDK. The following sections may reference threa
 
 Skarbot has one thread model with two concrete uses:
 
-- a `user thread` for each approved user
-- a `task thread` for each task
+- a `user-thread` for each approved user
+- a `task-thread` for each task
 
-A `user thread` is the user’s long-lived conversation. A `task thread` is scoped work with its own history and workspace.
+A `user-thread` is the user’s long-lived conversation. A `task-thread` is scoped work with its own history and workspace.
 
-### Thread storage
+### Thread history and attachments
 
 ```text
-~/skarbot/state/threads/
+~/skarbot/workspaces/
   users/
     <user-id>/
-      thread.jsonl
-      thread.meta.json
-      attachments/
+      chat/
+        history.jsonl
+        thread.meta.json
+        attachments/
+      tasks/
+        <task-slug>/
+          history.jsonl
+          attachments/
   tasks/
     <user-id>/
-      <task-slug>.jsonl
-      <task-slug>.attachments/
+      <task-slug>/
+        chat/
+          history.jsonl
+          attachments/
 ```
 
 Naming rules:
 
-- user-thread files live at `users/<user-id>/thread.jsonl`
-- user-thread metadata files live at `users/<user-id>/thread.meta.json`
-- user-thread attachments live at `users/<user-id>/attachments/`
-- task-thread files use `tasks/<user-id>/<task-slug>.jsonl`
-- task-thread attachments live in `tasks/<user-id>/<task-slug>.attachments/`
-- the session header `id` matches the user id for a user thread or the owner-scoped task identifier for a task thread
+- user-thread history lives at `users/<user-id>/chat/history.jsonl`
+- user-thread metadata lives at `users/<user-id>/chat/thread.meta.json`
+- user-thread attachments live at `users/<user-id>/chat/attachments/`
+- task-thread history lives at `tasks/<user-id>/<task-slug>/chat/history.jsonl`
+- task-thread attachments live at `tasks/<user-id>/<task-slug>/chat/attachments/`
+- owned task history is also exposed at `users/<user-id>/tasks/<task-slug>/history.jsonl` as a runtime-owned read-only view
+- owned task attachments are also exposed at `users/<user-id>/tasks/<task-slug>/attachments/` as a runtime-owned read-only view
+- the session header `id` matches the user id for a `user-thread` or the owner-scoped task identifier for a `task-thread`
 
 Creation rules:
 
-- a user-thread directory is created lazily on the first real inbound user message
-- a user-thread session file is created lazily in that directory on the first real inbound user message
-- a user-thread metadata file is created lazily in that directory on that same first inbound user message
-- a user-thread attachment directory is created lazily in that directory on the first attachment
-- a task-thread session file is created lazily on the first actual run
-- a task-thread attachment directory is created lazily on the first attachment
+- a user workspace is created lazily on the first real inbound user message
+- `chat/history.jsonl` is created lazily on that same first inbound user message
+- `chat/thread.meta.json` is created lazily on that same first inbound user message
+- `chat/attachments/` is created lazily on the first user-thread attachment
+- the task execution workspace under `workspaces/tasks/...` is created lazily on the first actual run
+- `tasks/<user-id>/<task-slug>/chat/history.jsonl` is created lazily on that same first task run
+- `tasks/<user-id>/<task-slug>/chat/attachments/` is created lazily on the first task-thread attachment
+- `users/<user-id>/tasks/<task-slug>/` is created lazily when that task first becomes visible from the `user-thread`
 
 ### Thread file format
 
@@ -170,14 +179,17 @@ Core `pi` message rules:
 - tool use is represented through assistant `ToolCall` content blocks
 - tool results use `role = "toolResult"` and carry `toolCallId`, `toolName`, structured `content`, `isError`, and timestamp
 - core messages stay free of ad-hoc routing fields
+- attachment-bearing content blocks should store attachment filenames that resolve within the owning thread's runtime-owned attachment directory
 
 ### User-thread metadata file
 
-A user thread has a tiny metadata file that remembers the latest reply channel:
+A `user-thread` has a tiny metadata file that remembers the latest reply channel:
 
 ```json
 { "latest_reply_channel": "web" }
 ```
+
+This file lives at `~/skarbot/workspaces/users/<user-id>/chat/thread.meta.json`.
 
 Allowed channel names are:
 
@@ -195,7 +207,11 @@ Attachment filenames are sanitized before they are written to disk.
 
 Attachment-capable channels save files locally at ingress under the thread's attachment directory and convert them into standard `pi`-compatible `user.content` blocks.
 
-When an attachment is needed for work, the runtime may materialize it into the active workspace, but the canonical stored copy remains under the thread.
+Attachment references in thread history use stored filenames such as `invoice.pdf`.
+
+When an attachment is needed for work, the agent reads it directly from that thread's own `chat/attachments/`.
+
+When a task-thread history file is read from the `user-thread` task view at `./tasks/<task-slug>/history.jsonl`, those filenames resolve through the matching read-only task view at `./tasks/<task-slug>/attachments/`.
 
 ### Compaction in thread history
 
@@ -222,19 +238,23 @@ Every workspace contains a local `MEMORY.md`. See [runtime.md](./runtime.md) for
 
 Workspaces may also contain copies or links of thread attachments that are being actively used during execution.
 
+Every thread workspace contains its own canonical `chat/` history tree. User workspaces also contain the runtime-owned `tasks/` read-only views described above. These paths are readable by the agent and not edited directly by the agent.
+
+The runtime enforces those read-only paths. Normal agent file-editing tools and shell commands must not modify them.
+
 Creation and lifecycle rules:
 
 - user-thread workspaces are created lazily on the first actual user-thread action
 - task workspaces are created lazily on the first run
 - user-thread workspaces persist by default
-- task workspaces follow task lifecycle rather than a free-form pruning policy
+- task workspaces follow task lifecycle and deterministic cleanup rules
 
 A task workspace is eligible for deterministic deletion only when both conditions are true:
 
-- the matching task file is inactive
+- the matching task file is in `inactive/` or `failed/`
 - the workspace root contains an empty `.deleteworkspace` sentinel file
 
-Failed task workspaces are retained.
+Task workspaces are retained by default. When a one-off task moves to `inactive/`, the runtime prunes known heavy generated directories from the workspace. When a task moves to `failed/`, the runtime prunes those same directories. When a recurring task is disabled and moves to `inactive/`, the runtime may prune those same directories then as well.
 
 ## Tasks
 
@@ -244,6 +264,8 @@ Tasks are file-backed and intentionally simple.
 ~/skarbot/state/tasks/
   <user-id>/
     <task-slug>.json
+    paused/
+      <task-slug>.json
     inactive/
       <task-slug>.json
     failed/
@@ -253,10 +275,11 @@ Tasks are file-backed and intentionally simple.
 Lifecycle is defined by directory placement, not by a mutable `status` field.
 
 - active tasks live in `~/skarbot/state/tasks/<user-id>/`
+- paused tasks live in `~/skarbot/state/tasks/<user-id>/paused/`
 - inactive tasks move to `inactive/` within that user’s task directory
 - failed tasks move to `failed/` within that user’s task directory
 
-A task is canonically identified by its owner id plus task filename stem. When a task has a `schedule`, that same owner-scoped identifier is its internal schedule identifier, while the user-facing handle in that owner’s user thread remains the task filename stem.
+A task is canonically identified by its owner id plus task filename stem. When a task has a `schedule`, that same owner-scoped identifier is its internal schedule identifier, while the user-facing handle in that owner’s `user-thread` remains the task filename stem.
 
 ### Task filename rules
 
@@ -279,6 +302,8 @@ Rules:
   "instructions": "Prepare a weekday briefing for Neil.",
   "owner": "john_smith",
   "notification": ["user-thread"],
+  "model": "openai-codex/gpt-5.4",
+  "reasoning_effort": "medium",
   "capability": {
     "kind": "skill",
     "name": "briefing"
@@ -300,34 +325,52 @@ Required fields:
 
 `capability` is optional.
 
+`model` is optional.
+
+`reasoning_effort` is optional.
+
 Field rules:
 
 - `owner` stores a stable internal Skarbot user id
 - `instructions` is one plain string
 - `notification` is a list
 - notifications always target the task owner
+- if `model` is omitted, the task thread uses the deployment default model
+- if `reasoning_effort` is omitted, the task thread uses the deployment default reasoning effort
+- `model`, when present, overrides the default model for that task thread
+- `reasoning_effort`, when present, overrides the default reasoning effort for that task thread
 - `capability`, when present, identifies the custom tool or skill the task is creating or updating
 
 Notification values are:
 
-- `[]` — keep output in the task thread only
+- `[]` — keep output in the `task-thread` only
 - `["user-thread"]`
 - `["sms"]`
 - `["user-thread", "sms"]`
 
 Schedule forms are:
 
-- omitted — start now in a task thread
+- omitted — start now in a `task-thread`
 - `{ "at": "<ISO timestamp>" }` — run once later
+- `{ "at": "<ISO timestamp>", "timezone": "<IANA timezone>" }` — run once later with a timezone override
 - `{ "cron": "<expr>" }` — recurring schedule
+- `{ "cron": "<expr>", "timezone": "<IANA timezone>" }` — recurring schedule with a timezone override
 
 A scheduled automation is just an active task file with a `schedule` field. There is no separate schedule registry, schedule database, or schedule config layer.
 
-Recurring schedules use the owner's user record timezone.
+`schedule.at` uses ISO 8601 date-time text.
+
+`schedule.cron` uses standard 5-field cron syntax.
+
+`schedule.timezone` uses an IANA timezone name such as `America/Chicago`.
+
+If `schedule.timezone` is omitted, the task uses the owner's user-record timezone.
+
+If `schedule.at` includes its own timezone, that value wins over `schedule.timezone`.
 
 The scheduler discovers schedules only by scanning active task files. Schedule creation, edit, and deletion are task-file create, edit, and move operations.
 
-Recurring schedules reuse one bound task thread. One-off schedules create throwaway task threads.
+Recurring schedules reuse one bound `task-thread`. One-off schedules create throwaway `task-thread`s.
 
 Capability form:
 
@@ -347,7 +390,7 @@ When `capability` is present, the task is building or updating a custom tool or 
 
 ### Task thread and workspace creation
 
-Creating a task file does not immediately create the task thread, task session file, or task workspace. Those are all created lazily on the first actual run in that task owner’s namespace.
+Creating a task file does not immediately create the `task-thread`, task session file, or task workspace. Those are all created lazily on the first actual run in that task owner’s namespace.
 
 ## Approvals
 
@@ -379,6 +422,7 @@ Each approval file is named `<approval-id>.json`, for example `550e8400-e29b-41d
 ```json
 {
   "id": "550e8400-e29b-41d4-a716-446655440000",
+  "reply_code": "A14",
   "approver_id": "john_smith",
   "kind": "schedule-edit",
   "summary": "Move the morning briefing to 8:00 AM.",
@@ -390,11 +434,14 @@ Each approval file is named `<approval-id>.json`, for example `550e8400-e29b-41d
 
 Rules:
 
+- `id` is the stable internal UUID
+- `reply_code` is the short user-facing code included in approval messages
+- `reply_code` only needs to be unique within the active approval set
+- replies over web, SMS, and email use `reply_code`, not the UUID
 - `approver_id` remains in the record
 - `source` stores the source identifier the approval originated from
 - task-thread approvals use the owner-scoped task identifier, for example `john_smith/morning-briefing`; user-thread approvals use just the user id, for example `john_smith`
 - `expires_at` is optional
-- approval ids are UUIDs
 - approval handling is deterministic runtime behavior, not model judgment
 
 ## Capabilities
@@ -437,7 +484,7 @@ Rules:
 
 - active user capabilities load automatically for that user’s runs
 - draft capabilities do not load into normal runs
-- workspace-local capabilities may be loaded temporarily in a task thread for testing before they are submitted into `drafts/`
+- workspace-local capabilities may be loaded temporarily in a `task-thread` for testing before they are submitted into `drafts/`
 - system capability names are reserved
 - user capabilities must have unique names at activation time
 - moving a draft to `active/` is a user-thread approval action, not a task-thread action

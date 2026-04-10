@@ -1,262 +1,373 @@
 # Runtime
 
-This document defines how Skarbot composes a run: execution profiles, tool contracts, model behavior, task execution, memory, approvals, and autonomy boundaries. Persistent file layout lives in [Architecture](architecture.md). Host setup lives in [Deployment](deployment.md).
+Skarbot runs in two execution profiles: `user-thread` and `task-thread`.
 
-## Execution model
+Threads persist across turns.
 
-Skarbot has two execution profiles:
+## Runtime building blocks
 
-- `user-thread` for a user's long-lived conversation
-- `task-thread` for scoped work such as one-off tasks, recurring scheduled tasks, and work to create new tools and skills for that user's workspace
+Every Skarbot run is assembled from the same core runtime state.
 
-## Shared runtime contract
+#### Thread history
 
-Both profiles share the same runtime contract:
+Each thread stores its canonical history in `./chat/history.jsonl` inside that thread's own workspace, using the `pi` session format defined by [`SessionHeader`](https://github.com/badlogic/pi-mono/blob/576e5e1a2fbe1abbbad96b696f4058cffd8391ca/packages/coding-agent/src/core/session-manager.ts#L29-L36). `SessionHeader.cwd` is the workspace path for that thread.
 
-- Thread history is stored as append-only `pi` session data
-  - Thread history uses the `pi` session format defined by [`SessionHeader`](https://github.com/badlogic/pi-mono/blob/576e5e1a2fbe1abbbad96b696f4058cffd8391ca/packages/coding-agent/src/core/session-manager.ts#L29-L36)
-  - `SessionHeader.cwd` is the thread workspace path
-  - Full history remains on disk even after compaction
-- Workspace state lives in a dedicated workspace per thread
-  - Each thread has its own workspace
-  - Each workspace keeps durable memory in a local `MEMORY.md`
-- Capabilities are loaded fresh from the canonical filesystem roots
-  - System capabilities load from `~/skarbot/core/capabilities/`
-  - The owner's active capabilities load from `~/skarbot/state/capabilities/<user-id>/`
-  - Active capabilities are re-resolved at the start of each run or turn
+In the `user-thread` workspace, owned task histories are also available under `./tasks/<task-slug>/history.jsonl` as runtime-owned read-only views into those task workspaces.
 
-## User-thread profile
+Thread history remains append-only on disk even after compaction.
 
-The user-thread profile powers a user’s long-lived main conversation.
+#### Workspace
 
-- Storage
-  - Thread file: `~/skarbot/state/threads/users/<user-id>/thread.jsonl`
-  - Metadata file: `~/skarbot/state/threads/users/<user-id>/thread.meta.json`
-  - Attachments: `~/skarbot/state/threads/users/<user-id>/attachments/`
-  - Workspace: `~/skarbot/workspaces/users/<user-id>/`
+Each thread has its own workspace. That workspace is the working directory for the turn and the home of its durable local memory in `MEMORY.md`.
 
-- Behavior
-  - Loads system capabilities plus the owner’s active capabilities
-  - Reply routing follows the user-thread metadata file
-  - Schedule management is owned from the user thread
+Each thread workspace also includes these runtime-owned paths:
 
-## Task-thread profile
+```text
+./chat/history.jsonl
+./chat/attachments/
+```
 
-The task-thread profile powers every scoped task.
+The `user-thread` workspace also includes these runtime-owned read-only task views:
 
-- Storage
-  - Thread file: `~/skarbot/state/threads/tasks/<user-id>/<task-slug>.jsonl`
-  - Attachments: `~/skarbot/state/threads/tasks/<user-id>/<task-slug>.attachments/`
-  - Workspace: `~/skarbot/workspaces/tasks/<user-id>/<task-slug>/`
+```text
+./tasks/<task-slug>/history.jsonl
+./tasks/<task-slug>/attachments/
+```
 
-- Behavior
-  - Loads system capabilities plus the owner’s active capabilities
-  - A task that is creating a capability for a user may stage that capability in its own task thread and load it there temporarily for testing and preview
-  - Recurring scheduled runs reuse their bound task thread
-  - One-off schedules use throwaway task threads
+The runtime enforces these read-only paths. Normal agent file-editing tools and shell commands must not modify them.
 
-## Tool contracts
+#### Capabilities
 
-Skarbot reuses `pi`'s built-in coding tools and adds a small system layer. The detailed tool contract lives in [Tools](tools.md).
+Each turn starts with the built-in system tools and skills together with the user's active tools and skills.
 
-- Shared tools
-  - Both execution profiles expose the baseline coding tools plus shared system tools such as web access, planning, subagents, and model selection
+These are referred to collectively as capabilities in this documentation.
 
-- User-thread tools
-  - The user-thread profile adds schedule management
+Users can create new capabilities using a task. After user approval, the new capability becomes active for future `user-thread` and `task-thread` runs.
 
-- Task-thread tools
-  - The task-thread profile adds `ask-user(question)` and `capabilities(...)`
+#### Attachments
 
-## Model behavior
+Threads may include attachment references in their history.
 
-Skarbot uses one deployment provider: `openai-codex`. New threads start on the repo-defined deployment default model. A thread may switch models during its lifetime, and that choice is remembered per thread in session history.
+Attachment-bearing history entries store attachment filenames. For the current thread, those filenames resolve under `./chat/attachments/`. In the `user-thread` workspace, owned task attachments are also available under `./tasks/<task-slug>/attachments/`.
 
-Rules:
+#### Task-backed state
 
-- a thread’s model choice does not change any other thread
-- resuming a thread restores its last selected model when that model remains available
-- resuming a thread from a non-web channel still uses that thread’s persisted current model
-- available models are discovered from the provider at runtime
-- thread usage and cost come from session metadata
-- the current model should be visible in thread or session UI
-- thread or session summaries should be able to show tokens and cost for that thread
+`task-thread` workspaces include a local `TASK.md` copy of the current task details.
 
-Skarbot does not build a generated model catalog, an instance-level model list, a fallback matrix, or a multi-provider routing layer into the product runtime.
+#### Thread state
 
-## Compaction and memory
+Each thread may be idle, active, or waiting.
 
-Memory is deliberately simple.
+## Execution profiles
 
-### Durable memory
+Skarbot has two execution profiles: `user-thread` and `task-thread`.
 
-Every workspace has a local `MEMORY.md`. That file holds compact durable notes worth carrying forward inside that same workspace.
+#### User-thread
 
-The agent maintains `MEMORY.md` through the normal coding tools. There is no dedicated memory tool.
+The `user-thread` profile powers a user's long-lived conversation with Skarbot. It owns reply-channel memory and task control for that user.
 
-### What compaction is
+#### Task-thread
 
-Compaction is automatic context management, not memory storage.
+The `task-thread` profile powers scoped work such as one-off tasks, recurring scheduled tasks, and work to create or update custom tools and skills. Task-thread runs may also use task-backed state and task-local preview when the task is creating a custom tool or skill for a user.
 
-Compaction behavior:
+## Turn triggers
 
-- it triggers proactively near the context limit
-- it appends a compaction boundary into thread history
-- it keeps the latest rolling summary plus a recent verbatim tail in future context
-- it truncates oversized tool-call and tool-result content before summarization
-- it supports one overflow-recovery compact-and-retry path
+A Skarbot turn begins when new work enters the runtime or when waiting work is resumed.
 
-Compaction preserves access to full append-only history on disk. It does not replace `MEMORY.md`.
+Current triggers are:
 
-### What belongs in memory versus history
+- user messages from web
+- user messages from SMS
+- admin approval replies over email
+- scheduled task execution
+- user approval replies that resume paused work
 
-The repo baseline in `~/skarbot/core` is not memory. It is the checked-in product contract.
+## Channel and thread routing
 
-Routine outputs, run-by-run logs, and scheduled-task output stay in thread history by default. `MEMORY.md` is for durable notes that should help future turns in the same workspace.
+The user's `user-thread` is the only required user-facing control surface. Users should be able to manage all of their work from that thread, including over SMS.
 
-## Task execution rules
+#### Execution
 
-Tasks use the simplest viable runtime model.
+Scoped work runs in `task-thread` turns. A `task-thread` is the canonical execution log for that task.
 
-Creation rules:
+User messages from web and SMS land in the owner's `user-thread`.
 
-- if Skarbot does not have enough information to create a task, it asks follow-up questions and does not create the file yet
-- a task is not created until its notification list is defined
-- ordinary tasks do not require approval before activation
-- tasks with no `schedule` start immediately in their own task thread rather than in the user thread
-- user-owned schedules are managed from the owner’s user thread even when the underlying execution is represented by a task file
+Scheduled execution starts in the bound task thread. Admin approval replies over email resume the approval-bound work they refer to.
 
-Execution rules:
+#### Control
 
-- the scheduler reads only active task files from each owner directory under `~/skarbot/state/tasks/`
-- scheduled work is discovered only by scanning those active task files for a `schedule` field
-- each task maps to exactly one task thread while it is active
-- recurring schedules reuse one dedicated task thread
-- one-off later schedules use throwaway task threads
+Users can ask for task status, answer follow-up questions, approve changes, pause tasks, resume tasks, cancel tasks, or change task instructions from the `user-thread`.
 
-Completion and cleanup rules:
+The user-thread agent must be able to inspect and control task-thread work through deterministic runtime tools.
 
-- after a one-off task succeeds, its task file moves to `~/skarbot/state/tasks/<user-id>/inactive/`
-- if a task fails, its task file moves to `~/skarbot/state/tasks/<user-id>/failed/`
-- disabling a recurring task moves it to `~/skarbot/state/tasks/<user-id>/inactive/`
-- a successful task that should discard its workspace writes an empty `.deleteworkspace` file at the workspace root before or when it moves inactive
-- failed task workspaces are retained
-- workspace cleanup is performed by a deterministic local cleanup command, not by the LLM
-- a workspace is deleted only when the matching task file is inactive and the `.deleteworkspace` sentinel exists
-- the cleanup path is zero-token and exits immediately when no deletion markers exist
+The user-thread agent can also read its own conversation history from `./chat/` and owned task histories from `./tasks/`. The `./tasks/` paths are runtime-owned and read-only to the agent.
 
-## Capability workflow
+Waiting for user input or approval returns control to the `user-thread` and resumes later on the waiting thread as a new turn.
 
-Capability work happens in task threads.
+#### Delivery
 
-Flow:
+Replies to ordinary user conversation go back through the user's current reply channel.
 
-1. Create or resume a capability-building task.
-2. Seed the task workspace from the candidate capability if one exists, otherwise from the active capability if one exists.
-3. Edit the working bundle inside the task workspace.
-4. Run `capabilities(promote, ...)`.
-5. If validation fails, return diagnostics to the task immediately.
-6. If validation succeeds, stage the candidate and request user approval.
-7. On approval, replace the active capability and delete the candidate.
+When a task needs input, requests approval, or reports a result, the runtime surfaces that interaction through the user's `user-thread`.
 
-Newly approved capabilities become visible on the next run or turn. Skarbot does not hot-swap them into a run that is already in progress.
+A user reply in the `user-thread` resumes or controls the waiting task thread when the runtime binds that reply to the originating task.
 
-## Approvals
+If a user sends input to an active task, the runtime records it on that task thread and delivers it at the next runtime checkpoint between tool and model steps.
 
-Skarbot uses one approval system with two approver classes:
+#### Prompt sequencing
+
+Task-originated questions, approvals, and other requests for user input appear in the user's `user-thread`.
+
+The runtime presents at most one active user prompt at a time for a given user. If multiple prompts become ready at once, it should group them when clear, otherwise queue them and present them one at a time.
+
+## Turn lifecycle
+
+Each turn is a bounded execution against an existing thread.
+
+#### Start
+
+A turn starts when new work enters the runtime or when waiting work is resumed.
+
+At the start of a turn, the runtime loads the current thread history, workspace, model state, built-in tools, and active capabilities for that thread.
+
+#### Execute
+
+The turn executes in the current thread context and uses the tool surface defined in [Tools](tools.md).
+
+A turn may perform multiple model and tool iterations before it completes.
+
+The runtime owns the iteration budget, timeout policy, retry policy, and loop detection for that turn.
+
+#### Pause
+
+A turn pauses when it reaches a waiting state such as waiting for user input, waiting for approval, or waiting for another runtime-managed result.
+
+The waiting state is recorded on the thread and the active turn ends.
+
+#### Resume
+
+When the blocking state resolves, the runtime starts a new turn on the same thread with the resolved result.
+
+#### Interrupt
+
+A turn may also be interrupted by runtime control, new user input, shutdown, restart, or timeout.
+
+Interrupt ends the active turn attempt without discarding the thread. The runtime may later start a new turn on that same thread.
+
+#### Complete
+
+At the end of the turn, the runtime persists the resulting thread state and emits any replies or notifications through the correct channel.
+
+## Model Providers
+
+Skarbot only supports using OpenAI's subscription as a model provider today.
+
+Default model is `openai-codex/gpt-5.4` with `medium` reasoning effort. Users can adjust the model in their `user-thread` by asking Skarbot. Model selection is persisted in the thread's history.
+
+Task threads normally use the default model and reasoning effort too. If the task file specifies a model override, the runtime uses that model for the task thread instead.
+
+An administrator can set or refresh the subscription auth token using `skarbot auth`, which generates a link for the administrator to open and sign in. The auth token is stored in `~/.skarbot/auth.json`.
+
+If a thread resumes with a model that is no longer available, the runtime falls back to another available model.
+
+## Tasks, schedules, and long-running work
+
+Tasks are units of work executed outside the `user-thread`. They keep scoped work in a separate thread and workspace.
+
+If Skarbot determines that a request is complex enough to deserve its own workspace, it asks follow-up questions in the `user-thread` and then creates a task file.
+
+#### Task start modes
+
+Tasks support three start modes:
+
+- **Immediate**: no `schedule`. Starts immediately in its own `task-thread`.
+- **One-off scheduled**: `schedule.at` is set. Runs once at the requested time.
+- **Recurring**: `schedule.cron` is set. Runs repeatedly on that schedule.
+
+The scheduler discovers scheduled work by scanning active task files under `~/skarbot/state/tasks/<user-id>/`. There is no separate schedule registry.
+
+#### Task threads and workspaces
+
+Each active task runs against its own task thread and task workspace.
+
+Recurring tasks reuse the same task thread and workspace across runs.
+
+One-off scheduled tasks may use a throwaway task thread and workspace for the scheduled run.
+
+#### Task file lifecycle
+
+Task files are stored under:
+
+```text
+~/skarbot/state/tasks/<user-id>/
+```
+
+When a task finishes successfully, its task file moves to:
+
+```text
+~/skarbot/state/tasks/<user-id>/inactive/
+```
+
+When a task fails, its task file moves to:
+
+```text
+~/skarbot/state/tasks/<user-id>/failed/
+```
+
+When a task is paused, its task file moves to:
+
+```text
+~/skarbot/state/tasks/<user-id>/paused/
+```
+
+Disabling a recurring task also moves its task file to `inactive/`.
+
+#### Workspace cleanup
+
+Task workspaces are retained by default.
+
+When a one-off task moves to `inactive/`, the runtime prunes known heavy generated directories from the workspace. When a task moves to `failed/`, the runtime prunes those same directories so the workspace stays diagnosable without retaining large dependency trees and build artifacts.
+
+Recurring task workspaces are retained while the task remains active. When a recurring task is disabled and moves to `inactive/`, the runtime may prune those same directories then as well.
+
+The prune list is deterministic. It includes:
+
+- `node_modules/`
+- `.venv/`
+- `venv/`
+- `target/`
+- `dist/`
+- `build/`
+- `.next/`
+- `.pytest_cache/`
+- `__pycache__/`
+- `.mypy_cache/`
+- `.ruff_cache/`
+- `.gradle/`
+
+Full workspace deletion is separate and admin-only. It only happens when an administrator adds an empty `.deleteworkspace` file to the workspace root and the matching task file is in `inactive/` or `failed/`.
+
+The cleanup command runs locally on startup and then from cron every 30 minutes.
+
+## Custom tools and skills
+
+Users can add custom tools and skills to Skarbot beyond what was provided by default.
+
+That work happens in a `task-thread`, not in the `user-thread`. The `task-thread` gets its own workspace so Skarbot can edit, test, and validate the work without affecting the user's main workspace.
+
+If the user is updating an existing custom tool or skill, the task starts from the current `drafts/` version if one exists. Otherwise it starts from the `active/` version. If neither exists, Skarbot creates it from scratch in the task workspace.
+
+While the task is running, Skarbot can load the in-progress tool or skill inside that `task-thread` for testing and preview. It is only available in that `task-thread` until the user approves it.
+
+When the work is ready, Skarbot runs deterministic validation.
+
+If validation fails, the task stays in the `task-thread` and Skarbot continues from the validation output.
+
+If validation succeeds, Skarbot writes the validated result to the user's `drafts/` area and asks for approval in the `user-thread`.
+
+If the user approves it, the draft moves to `active/` and becomes available on the next run.
+
+If the user denies it or gives feedback, it does not become active. The draft stays in `drafts/` so Skarbot can keep working on it later.
+
+## Memory and compaction
+
+Every thread workspace has its own `MEMORY.md`.
+
+`MEMORY.md` holds durable notes for that workspace. The `user-thread` workspace has one. Each `task-thread` workspace has one too.
+
+Skarbot updates `MEMORY.md` using the normal coding tools.
+
+Thread history stays in the thread file. It remains append-only on disk after compaction.
+
+Before compaction, the runtime may run one silent memory flush turn on the same thread. That turn asks Skarbot to write any durable notes from the recent work into `MEMORY.md`.
+
+The memory flush runs when estimated thread context exceeds `contextWindow - reserveTokens - memoryFlushThreshold`. In other words, Skarbot starts the memory flush shortly before normal compaction would begin.
+
+Default memory and compaction settings are:
+
+- `reserveTokens: 20000`
+- `keepRecentTokens: 20000`
+- `memoryFlushThreshold: 4000`
+- one memory flush per compaction cycle
+
+Compaction runs when estimated thread context exceeds `contextWindow - reserveTokens`. `reserveTokens` is the headroom the runtime keeps free for the next prompt and response.
+
+When compaction runs, the runtime writes a compaction summary into the thread history and keeps the newest entries in full. Future turns load that summary together with those newer entries.
+
+Compaction usually happens between turns. If one turn is too large, the runtime may summarize the earlier part of that turn and keep the newer part in full.
+
+Large tool-call and tool-result content is truncated before summarization so the compaction summary stays focused on the useful state of the thread.
+
+If a turn hits context overflow, the runtime may compact and retry once.
+
+## Approvals and pause or resume behavior
+
+Skarbot has an approval system with two approver classes:
 
 - `user`
 - `admin`
 
-Approvals are deterministic runtime objects, not model guesses. Approval record storage and path-based lifecycle live in [Architecture](architecture.md).
+User approvals appear in the owner's `user-thread`. Users can approve them from web or SMS.
 
-Resolving an approval moves its file out of `pending/` and into exactly one of `approved/`, `denied/`, `feedback/`, or `expired/` under the correct approver class.
+Admin approvals are sent over admin email.
 
-### Canonical reply grammar
+#### Reply format
 
-Every approval has a stable UUID id such as `550e8400-e29b-41d4-a716-446655440000`. Every approval message includes the accepted actions:
+Each approval has:
 
-- `approve <id>`
-- `deny <id>`
-- `feedback <id>: <text>`
+- a stable internal UUID
+- a short reply code such as `A14`
 
-Different channels may render richer UI, but they map to the same actions.
+The short reply code is what users see and reply with.
 
-### User approvals
+Web can render buttons, but the canonical text replies are:
 
-User approvals are delivered into the owner’s user thread and may be resolved over web or SMS.
+- `approve A14`
+- `deny A14`
+- `feedback A14: <text>`
 
-Typical user approvals include:
+#### Waiting behavior
 
-- capability promotion
+When a thread reaches an approval point, the current turn pauses and the pending approval is recorded on that thread.
+
+When the approval resolves, the runtime starts a new turn on that same thread with the approval result.
+
+- `approve` resumes with an approved result
+- `deny` resumes with a denied result
+- `feedback` resumes with the feedback text
+- `expired` resumes as a denied result
+
+`feedback` resolves that approval. If Skarbot needs approval again after making changes, it creates a new approval with a new reply code.
+
+#### Approval lifecycle
+
+Resolving an approval moves it out of `pending/` and into one of these directories:
+
+- `approved/`
+- `denied/`
+- `feedback/`
+- `expired/`
+
+#### Typical uses
+
+User approvals cover user-facing changes such as:
+
 - schedule creation
 - schedule edits
 - schedule deletion
-- other user-facing behavior changes that need confirmation
+- activating custom tools or skills
 
-### Admin approvals
-
-Admin approvals are rare and operational. They are delivered through the admin email path.
-
-Typical admin approvals include:
+Admin approvals cover operator actions such as:
 
 - host package installs
-- new outbound destinations such as SMS recipients
-- `exe.dev` sharing or integration changes
+- new outbound destinations
 - destructive actions outside owned roots
 - deployment-wide runtime changes
 
-A task may not open an admin approval on its own when the work belongs to a user. It must first ask the user whether they want to escalate the request.
+If user-owned work needs admin approval, Skarbot asks the user first. It only creates the admin approval after the user agrees to escalate.
 
-### Feedback resolution rule
+## Autonomy
 
-`feedback <id>: <text>` is terminal for that approval record.
+Skarbot can act autonomously in `~/skarbot/state/` and `~/skarbot/workspaces/`.
 
-When Skarbot receives feedback:
-
-- the approval file moves from `pending/<class>/` to `feedback/<class>/`
-- the feedback text is written back into the source task or source thread
-- the blocked task or thread resumes with that feedback payload
-- any later revised approval is created as a new approval id, not as a silent reuse of the old one
-
-This keeps approval state deterministic and removes the ambiguity between “still pending” and “resumed with feedback.”
-
-### Waiting behavior
-
-A task blocked on an approval pauses against that pending approval id.
-
-When the approval resolves:
-
-- `approve` resumes the task with an approved result
-- `deny` resumes the task with a denied result
-- `feedback` resumes the task with the feedback content
-- `expired` resumes the task as a denied-equivalent outcome
-
-Approval resolution flows back into the source task or thread deterministically.
-
-## Autonomy boundary
-
-Skarbot is autonomous by default only inside its owned runtime roots:
-
-- `~/skarbot/state`
-- `~/skarbot/workspaces`
-
-It is **not** autonomous in:
-
-- `~/skarbot/core`
-- host package management
-- deployment-sharing and integration settings
-- destructive operations outside owned roots
-
-Additional rules:
-
-- product code changes go through normal git workflow
-- the running agent does not self-merge
-- outbound SMS is allowed only to explicitly allowlisted numbers
-- SMS may carry user approvals, but not admin approvals
-
-## See also
-
-- [Architecture](architecture.md)
-- [Deployment](deployment.md)
-- [Product](product.md)
+Admin approval is required for any changes outside those folders and for host package management.
